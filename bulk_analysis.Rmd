@@ -1,0 +1,342 @@
+---
+title: "Bulk RNA-seq Analysis"
+date: "`r Sys.Date()`"
+author: "Tidjani Sabrina Anna"
+output: html_notebook
+---
+#Dependencies
+```{r}
+library(BiocManager)
+library(devtools)ma)
+library(edgeR)
+library(sessioninfo)
+library(SummarizedExperiment)
+library(MatrixGenerics)
+library(matrixStats)
+library(recount)
+library(recount3)
+library(dplyr)
+
+```
+
+
+```{r}
+rse_brain <- recount3::create_rse_manual(
+    project = "BRAIN",
+    project_home = "data_sources/gtex",
+    organism = "human",
+    annotation = "refseq",
+    type = "gene"
+)
+```
+
+
+```{r}
+rse_pancreas <- recount3::create_rse_manual(
+    project = "PANCREAS",
+    project_home = "data_sources/gtex",
+    organism = "human",
+    annotation = "refseq",
+    type = "gene"
+)
+```
+
+
+
+```{r}
+rse_kidney <- recount3::create_rse_manual(
+    project = "KIDNEY",
+    project_home = "data_sources/gtex",
+    organism = "human",
+    annotation = "refseq",
+    type = "gene"
+)
+```
+
+Convert coverage to counts
+```{r}
+assays(rse_brain)$counts <- transform_counts(rse_brain) 
+assays(rse_kidney)$counts <- transform_counts(rse_kidney) 
+assays(rse_pancreas)$counts <- transform_counts(rse_pancreas)
+```
+
+Selection of three replicates for each tissue 
+```{r}
+rse_brain_selected <- rse_brain[,c(73,74,75)]
+#rse_kidney_selected <- rse_kidney[,c(73,74,75)]
+#rse_kidney_selected <- rse_kidney[,c(76,77,78)] 
+#rse_kidney_selected <- rse_kidney[,c(81,82,83)] 
+rse_kidney_selected <- rse_kidney[,c(78,79,80)] 
+rse_pancreas_selected <- rse_pancreas[,c(73,74,75)]
+counts_brain_selected <- assays(rse_brain_selected)$counts
+counts_kidney_selected <- assays(rse_kidney_selected)$counts
+counts_pancreas_selected <- assays(rse_pancreas_selected)$counts
+```
+
+We build the count table, give more meaningful name to the columns and the rows, and finally build the DGE object for edgeR.
+
+```{r}
+x <- cbind(counts_brain_selected,counts_kidney_selected,counts_pancreas_selected)
+#Give Tissue-Column names
+colnames(x) <- c("Brain73","Brain74","Brain75","Kidney78","Kidney79","Kidney80","Pancreas73","Pancreas74","Pancreas75")
+#Give official gene name/symbol
+rownames(x) <- rowData(rse_brain_selected)$gene_name 
+#Creation of edgeR object (count table + additional info later)
+y <- DGEList(counts=x)
+```
+We define how replicates are grouped:
+
+```{r}
+group <- as.factor(c("Brain","Brain","Brain","Kidney","Kidney","Kidney","Pancreas","Pancreas","Pancreas"))
+#Add group field to the edgeR object
+y$samples$group <- group
+```
+
+We add to the samples info the “quality” information that we employed to select them:
+```{r}
+#Creating a new field for the RIN
+y$samples$rin <- as.factor(c(colData(rse_brain_selected)$gtex.smrin,colData(rse_kidney_selected)$gtex.smrin,colData(rse_pancreas_selected)$gtex.smrin))
+#Creating a new field for the specific part of the tissue
+y$samples$slice <- as.factor(c(colData(rse_brain_selected)$gtex.smtsd,colData(rse_kidney_selected)$gtex.smtsd,colData(rse_pancreas_selected)$gtex.smtsd))
+#Creating a new field for the sex 
+y$samples$sex <- as.factor(c(colData(rse_brain_selected)$gtex.sex,colData(rse_kidney_selected)$gtex.sex,colData(rse_pancreas_selected)$gtex.sex))
+#Creating a new field for the age
+y$samples$age <- as.factor(c(colData(rse_brain_selected)$gtex.age,colData(rse_kidney_selected)$gtex.age,colData(rse_pancreas_selected)$gtex.age))
+#Creating a new field for the ribosomal RNA
+y$samples$rRNA <- as.factor(c(colData(rse_brain_selected)$gtex.smrrnart,colData(rse_kidney_selected)$gtex.smrrnart,colData(rse_pancreas_selected)$gtex.smrrnart))
+#Creating a new field for the % of uniquely mapped reads
+y$samples$mapped <- as.factor(c(colData(rse_brain_selected)$"recount_qc.star.uniquely_mapped_reads_%_both",colData(rse_kidney_selected)$"recount_qc.star.uniquely_mapped_reads_%_both",colData(rse_pancreas_selected)$"recount_qc.star.uniquely_mapped_reads_%_both"))
+#Creating a new field for the mitochondrial RNA
+y$samples$chrm <- as.factor(c(colData(rse_brain_selected)$"recount_qc.aligned_reads%.chrm",colData(rse_kidney_selected)$"recount_qc.aligned_reads%.chrm",colData(rse_pancreas_selected)$"recount_qc.aligned_reads%.chrm"))
+y
+```
+
+Let's check how many genes have zero counts - they do not appear in any of the replicate
+```{r}
+ table(rowSums(y$counts==0)==9)
+```
+
+To keep only the genes that appear in all of the 3 replicates of the 3 tissues, we can also use an edgeR function.
+This function removes from the count table all the genes not expressed in the three samples because they have to be ignored in the normalization.
+```{r}
+keep.exprs <- filterByExpr(y, group=group)
+y <- y[keep.exprs,, keep.lib.sizes=FALSE]
+dim(y)
+```
+Less than half of the original genes.
+
+edgeR includes several useful functions for transforming the counts into counts per million, FPKM, TPM etc. Let us extract and store in a vector the log of the counts per million before normalization with the “cpm” function, and then normalize them:
+```{r}
+logcpm_before <- cpm(y, log=TRUE)
+#a factor for each sample that multiplied for the count values make the trend for which most of the genes don't change their expression
+y <- calcNormFactors(y, method = "TMM")
+y
+```
+
+
+```{r}
+logcpm_after <- cpm(y, log=TRUE)
+```
+
+What is the y axis? PUT THE LABEL!
+```{r}
+boxplot(logcpm_before, outline = FALSE, 
+        col = rep(c("turquoise2", "violetred2", "#B2D8B2"), each = 3), 
+        cex.axis = 0.6, xlab = "Replicate", ylab = "logCPM")
+
+
+```
+
+`
+```{r}
+boxplot(logcpm_after, outline = FALSE, 
+        col = rep(c("turquoise2", "violetred2", "#B2D8B2"), each = 3), 
+        cex.axis = 0.6, xlab = "Replicate", ylab = "logCPM")
+
+text(x = 1:ncol(logcpm_after), y = par("usr")[3] + 1, 
+     labels = round(y$samples$norm.factors, digits = 4), pos = 3, cex = 0.8)
+```
+The normalization moves up and down (linear shift) the boxplots such that the median for each sample is more or less the same.
+
+Now we design the linear model. Intercept or not, it changes little. Anyway, from a logical point of view the intercept is not needed here.
+```{r}
+design <- model.matrix(~0+group, data=y$samples)
+colnames(design) <- levels(y$samples$group)
+design
+ 
+```
+
+Now we have a matrix and point in a 20k dimentional space. Here we are squeezing not using the euclidean distance but the fold ration between two genes in each sample to plot in a 2D space. The genes are not all but the most variable (difference in expression of each couple of genes)
+```{r}
+logcpm <- cpm(y, log=TRUE)
+plotMDS(logcpm, labels=group)
+```
+Replicates cluster well. 
+labelling the points in the plot with different info
+```{r}
+ plotMDS(logcpm, labels=y$samples$rRNA)
+```
+
+```{r}
+plotMDS(logcpm, labels=y$samples$chrm)
+```
+
+Estimation of dispersion.
+This plot represent the relationship between the average expression and variability.
+The underlying statistical model is the NB, the variance depends on the dispersion (the biological coefficient of variation is the squared root of dispersion), so the bigger is this coeff, the bigger is the variability and the variance of the corresponding genes (gene specific).
+
+-Each dot is a gene
+-on the x axis expression (logCPM)
+-on the y axis the biological coefficient of variation (the squared root of dispersion)
+
+In red: estimated dispersion (one value for all the genes)
+Purple: trend that tries to put in relation the mean and the dispertion
+
+The key idea is that there is a dependency between mean and actual dispersion but we don't know what it is. We estimate it from the data and, as we see from the plot, it is not a line.
+The trend will be used to correct the original (just 3 replicates) dispertion. Each dot will be shrinked to the estimated trend.
+
+```{r}
+y <- estimateDisp(y, design)
+plotBCV(y)
+```
+
+Computation of the beta values
+```{r}
+fit <- glmQLFit(y, design)
+```
+
+The three comparisons return a data structure with all the info regarding the comparisons themselves, including a table with the result of the test for each gene.
+
+```{r}
+#kidney (top) vs brain (bottom) (if the change is positive: more kidney than in brain, and viceversa)
+qlfKB <- glmQLFTest(fit, contrast=c(-1,1,0))
+#pancreas (top) vs brain (bottom)
+qlfPB <- glmQLFTest(fit, contrast=c(-1,0,1))
+#pancreas (top) vs kidney(bottom)
+qlfPK <- glmQLFTest(fit, contrast=c(0,-1,1))
+```
+
+All the information- $table with the result of the test - positive more in kidney than brain  negative more in brain than kidney
+```{r}
+qlfKB
+head(qlfKB$table) 
+```
+The pvalue needs to be corrected for multiple testing-BH method.
+“topTags” extracts the table, sorted by p-value,
+and adds the FDR
+```{r}
+ topTags(qlfKB, n=10,adjust.method = "BH", sort.by = "PValue")
+```
+Full table
+
+```{r}
+resultsKB <- topTags(qlfKB, n = 10000000, adjust.method = "BH", sort.by = "PValue", p.value = 1)
+resultsPB <- topTags(qlfPB, n = 10000000, adjust.method = "BH", sort.by = "PValue", p.value = 1)
+resultsPK <- topTags(qlfPK, n = 10000000, adjust.method = "BH", sort.by = "PValue", p.value = 1)
+
+```
+
+Find genes overexpressed in Brain and Kindney. FDR<0.01 and CPM>1
+```{r}
+resultsKB_df <- as.data.frame(resultsKB)
+resultsKB_df$Gene <- rownames(resultsKB_df)
+resultsKB_df <- resultsKB_df %>% 
+  left_join(gene_info, by = "Gene") %>% 
+  mutate(Brain_plus = ifelse(logFC < 0, Gene, NA), Kidney_plus = ifelse(logFC >= 0, Gene, NA),
+         Brain_plus_FDR = ifelse(FDR < 0.01 & logFC < 0 & logCPM > 0, Gene, NA),
+         Kidney_plus_FDR = ifelse(FDR < 0.01 & logFC >= 0 & logCPM > 0, Gene, NA))
+```
+
+That can be saved in a file, e.g. for importing it in Excel:
+```{r}
+write.table(resultsKB, "resultsKB.txt")
+```
+
+Finally, a quick way to have an idea on how many DEG genes there are, according to different FDR/FC thresholds:
+```{r}
+
+summary(decideTests(qlfKB, p.value=0.01, lfc=1))
+summary(decideTests(qlfPB, p.value=0.01, lfc=1))
+summary(decideTests(qlfPK, p.value=0.01, lfc=1))
+```
+
+The fold change threshold does not seem to make a big difference. 
+We can save also the results of the other two comparisons:
+
+```{r}
+resultsPB <- topTags(qlfPB, n = 10000000, adjust.method = "BH", sort.by = "PValue", p.value = 1)
+resultsPK <- topTags(qlfPK, n = 10000000, adjust.method = "BH", sort.by = "PValue", p.value = 1)
+write.table(resultsPK, "resultsPK.txt")
+write.table(resultsPB, "resultsPB.txt")
+```
+
+Find genes overexpressed in Brain and Pancreas
+```{r}
+resultsPB_df <- as.data.frame(resultsPB)
+resultsPB_df$Gene <- rownames(resultsPB_df)
+resultsPB_df <- resultsPB_df %>% 
+  left_join(gene_info, by = "Gene") %>% 
+  mutate(Brain_plus = ifelse(logFC < 0, Gene, NA), Pancreas_plus = ifelse(logFC >= 0, Gene, NA),
+         Brain_plus_FDR = ifelse(FDR < 0.01 & logFC < 0 & logCPM > 0, Gene, NA), 
+         Pancreas_plus_FDR = ifelse(FDR < 0.01 & logFC >= 0 & logCPM > 0, Gene, NA))
+```
+
+Find genes overexpressed in Pancreas and Kindney
+```{r}
+resultsPK_df <- as.data.frame(resultsPK)
+resultsPK_df$Gene <- rownames(resultsPK_df)
+resultsPK_df <- resultsPK_df %>% 
+  left_join(gene_info, by = "Gene") %>% 
+  mutate(Kidney_plus = ifelse(logFC < 0, Gene, NA), Pancreas_plus = ifelse(logFC >= 0, Gene, NA),
+         Kidney_plus_FDR = ifelse(FDR < 0.01 & logFC < 0 & logCPM > 0, Gene, NA), 
+         Pancreas_plus_FDR = ifelse(FDR < 0.01 & logFC >= 0 & logCPM > 0, Gene, NA))
+```
+
+
+
+```{r}
+# Find the intersection of the Brain_plus_FDR column in both dataframes
+brain_both <- intersect(resultsKB_df$`Brain_plus_FDR`, resultsPB_df$`Brain_plus_FDR`)
+
+# Find the intersection of the Kidney_plus_FDR column in both dataframes
+Kidney_both <- intersect(resultsKB_df$`Kidney_plus_FDR`, resultsPK_df$`Kidney_plus_FDR`)
+
+# Find the intersection of the Pancreas_plus_FDR column in both dataframes
+Pancreas_both <- intersect(resultsPK_df$`Pancreas_plus_FDR`, resultsPB_df$`Pancreas_plus_FDR`)
+
+# Remove NAs from Brain_both
+brain_both <- na.omit(brain_both)
+
+# Remove NAs from Kidney_both
+Kidney_both <- na.omit(Kidney_both)
+
+# Remove NAs from Pancreas_both
+Pancreas_both <- na.omit(Pancreas_both)
+```
+
+Finally, let us check whether one of the genes that were DE among these samples are still DE if we consider the complete tissue datasets. 
+```{r}
+assays(rse_brain)$TPM <- recount::getTPM(rse_brain)
+assays(rse_kidney)$TPM <- recount::getTPM(rse_kidney)
+assays(rse_pancreas)$TPM <- recount::getTPM(rse_pancreas)
+which(rowData(rse_brain)$gene_name == "ATP1A3")
+```
+
+In this way we got the row number corresponding to gene "ATP1A3".
+
+```{r}
+ boxplot(assays(rse_brain)$TPM[28535,],assays(rse_kidney)$TPM[28535,], assays(rse_pancreas)$TPM[28535,], outline=F )
+```
+
+Final tables
+```{r}
+length(brain_both)
+length(Kidney_both)
+length(Pancreas_both)
+
+write.table(brain_both, "resultsBrain.txt")
+write.table(Kidney_both, "resultsKidney.txt")
+write.table(Pancreas_both, "resultsPancreas.txt")
+
+```
+
